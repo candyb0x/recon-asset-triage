@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.python-version
+
+# WorkBuddy session data
+.workbuddy-ai/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local inventories and triage runs
+*.csv
+*.jsonl
+tagged-assets*.json
+triage*.json
+output/
+runs/
