@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 
-SCORING_VERSION = "1.1.0"
+SCORING_VERSION = "1.2.0"
 LEVELS = {
     "A": (0, 5, 10, 15, 20),
     "T": (0, 5, 10, 20, 30, 40),
@@ -39,8 +39,13 @@ TECHNICAL_LOWER_LIMITS = {
 ADVISORY_BASES = {"lifecycle_confirmed", "advisory_candidate", "prerequisites_supported"}
 ACCESS_STATES = {
     "unknown", "error_only", "auth_wall", "public_content", "public_function",
-    "authenticated_function", "nonweb_service",
+    "authenticated_function", "nonweb_service", "render_pending", "render_failed", "transport_error",
 }
+OBSERVATION_STAGES = {
+    "inventory_only", "http_observed", "browser_rendered", "function_mapped",
+    "service_observed", "auth_blocked", "client_error", "browser_failed",
+}
+REVIEW_EVIDENCE_STAGES = {"http_observed", "browser_rendered", "function_mapped", "service_observed"}
 AUTH_GROUP_BASES = {"unknown", "user_reported", "observed", "documented"}
 QUEUE_REASONS = {
     "excluded": "Explicit scope exclusion; this asset is outside the review queue.",
@@ -56,9 +61,16 @@ QUEUE_REASONS = {
     "availability_recheck": "Access errors require an availability recheck, not a low-risk conclusion.",
     "routine_observation": "Only public content is currently evidenced; retain routine observation and change triggers.",
     "entry_evidence": "Entry-point evidence is insufficient to select a current application review target.",
+    "browser_evidence": "HTTP evidence is incomplete or JavaScript-dependent; render the page before judging functions.",
+    "browser_tool_review": "Browser observation failed; retain the unresolved application and diagnose the evidence gap.",
+    "client_transport_review": "The client or transport failed; this does not establish that the target has no service.",
 }
 LIVE_REVIEW_QUEUES = {
     "preauth_lead_review", "authenticated_app_review", "anonymous_app_review", "nonweb_service_review",
+}
+PENDING_OBSERVATION_QUEUES = {
+    "entry_evidence", "browser_evidence", "browser_tool_review", "client_transport_review",
+    "authenticated_surface_mapping", "role_required", "shared_auth_review", "availability_recheck",
 }
 
 
@@ -147,7 +159,23 @@ def access_context(asset):
     }
 
 
-def action_queue(scope, kind, technical_minimum, context):
+def observation_stage(asset):
+    stage = asset.get("observation_stage", "inventory_only")
+    if not isinstance(stage, str) or stage not in OBSERVATION_STAGES:
+        raise ValueError("observation_stage is not a supported evidence stage")
+    refs = string_ids(asset.get("observation_refs", []), "observation_refs")
+    browser_refs = string_ids(asset.get("browser_evidence_refs", []), "browser_evidence_refs")
+    function_refs = string_ids(asset.get("function_evidence_refs", []), "function_evidence_refs")
+    if stage != "inventory_only" and not refs:
+        raise ValueError("Non-inventory observation stages need observation_refs")
+    if stage == "browser_rendered" and not browser_refs:
+        raise ValueError("browser_rendered needs browser_evidence_refs, not just an HTTP body")
+    if stage == "function_mapped" and not function_refs:
+        raise ValueError("function_mapped needs specific function_evidence_refs")
+    return stage
+
+
+def action_queue(scope, kind, technical_minimum, context, stage):
     state = context["state"]
     roles = context["available_roles"]
     if scope == "out_of_scope":
@@ -156,6 +184,14 @@ def action_queue(scope, kind, technical_minimum, context):
         return "existing_finding_review"
     if technical_minimum >= 20:
         return "preauth_lead_review" if context["preauth_signal_refs"] else "advisory_applicability_review"
+    if state == "render_pending":
+        return "browser_evidence"
+    if state == "render_failed" or stage == "browser_failed":
+        return "browser_tool_review"
+    if state == "transport_error" or stage == "client_error":
+        return "client_transport_review"
+    if stage == "inventory_only":
+        return "entry_evidence"
     if state == "auth_wall":
         if roles:
             return "authenticated_surface_mapping"
@@ -260,10 +296,11 @@ def triage_asset(asset, index, seen_ids):
     upper = sum(value["max"] for value in bounds.values())
     kind = technical_basis(asset, bounds["T"]["min"], set(refs.get("T", [])))
     context = access_context(asset)
+    stage = observation_stage(asset)
     if kind == "service_observed" and context["state"] == "auth_wall":
         raise ValueError("An authentication wall alone cannot establish an observed operational service")
     priority, rule_id = classify(bounds, lower, upper, coverage, scope)
-    queue = action_queue(scope, kind, bounds["T"]["min"], context)
+    queue = action_queue(scope, kind, bounds["T"]["min"], context, stage)
     if scope == "out_of_scope":
         execution = "excluded"
     elif scope == "unknown":
@@ -287,12 +324,14 @@ def triage_asset(asset, index, seen_ids):
         "partial_dimensions": partial,
         "technical_basis_kind": kind,
         "access_context": context,
+        "observation_stage": stage,
         "action_queue": queue,
         "queue_reason": QUEUE_REASONS[queue],
-        "ready_for_live_review": scope == "in_scope" and enrichment_mode == "authorized_read_only" and queue in LIVE_REVIEW_QUEUES,
+        "evidence_collection_allowed": scope == "in_scope" and enrichment_mode == "authorized_read_only",
+        "ready_for_live_review": scope == "in_scope" and enrichment_mode == "authorized_read_only" and queue in LIVE_REVIEW_QUEUES and stage in REVIEW_EVIDENCE_STAGES,
         "enrichment_mode": enrichment_mode,
         "execution_status": execution,
-        "interpretation": "Heuristic review priority, not vulnerability confirmation or probability.",
+        "interpretation": "Technical-signal triage, not a vulnerability probability or a gate on authorized evidence collection. P4 can still have mapped functions worth application review.",
     }
     return result
 
@@ -309,6 +348,18 @@ def score_inventory(records, source_hash):
     counts = Counter(asset["triage"]["priority"] for asset in assets)
     executions = Counter(asset["triage"]["execution_status"] for asset in assets)
     queues = Counter(asset["triage"]["action_queue"] for asset in assets)
+    stages = Counter(asset["triage"]["observation_stage"] for asset in assets)
+    active = [asset for asset in assets if asset["triage"]["priority"] != "EXCLUDED"]
+    pending = sum(
+        asset["triage"]["observation_stage"] in {"inventory_only", "client_error", "browser_failed"}
+        or asset["triage"]["action_queue"] in PENDING_OBSERVATION_QUEUES
+        for asset in active
+    )
+    evidence_stage = (
+        "no_active_records" if not active
+        else "inventory_only" if all(asset["triage"]["observation_stage"] == "inventory_only" for asset in active)
+        else "partial_evidence" if pending else "evidence_available"
+    )
     complete = sum(asset["triage"]["score_total"] is not None for asset in assets)
     return {
         "scoring_version": SCORING_VERSION,
@@ -318,6 +369,11 @@ def score_inventory(records, source_hash):
             "priority_counts": {code: counts[code] for code in PRIORITY_LABELS},
             "execution_status_counts": dict(executions),
             "action_queue_counts": {queue: queues[queue] for queue in QUEUE_REASONS},
+            "evidence_stage_counts": {stage: stages[stage] for stage in sorted(OBSERVATION_STAGES)},
+            "pending_observation_records": pending,
+            "assessment_stage": evidence_stage,
+            "evidence_collection_allowed_count": sum(asset["triage"]["evidence_collection_allowed"] for asset in assets),
+            "ready_for_live_review_count": sum(asset["triage"]["ready_for_live_review"] for asset in assets),
             "auth_groups": authentication_groups(assets),
             "complete_score_records": complete,
             "interval_score_records": len(assets) - complete,

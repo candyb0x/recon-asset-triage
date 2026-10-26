@@ -1,4 +1,4 @@
 interface:
   display_name: "信息收集资产优先级研判"
-  short_description: "结合技术证据与认证可见面分流资产，区分当前可评估、共享认证复核和待补信息"
-  default_prompt: "使用 $recon-asset-triage 研判这批资产，核对技术证据与认证前后可见面，按当前角色分流行动队列，不从产品标题强行生成优先测试榜。"
+  short_description: "规划全量访问覆盖，核验动态业务与认证边界，再安排后续测试，保留未覆盖队列"
+  default_prompt: "使用 $recon-asset-triage 处理这批资产：先规划覆盖并执行已获准的普通核验，动态页用浏览器，回灌证据后再给进一步评估建议与未完成队列。"

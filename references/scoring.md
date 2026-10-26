@@ -1,6 +1,6 @@
 # 判别与评分参考
 
-本表是 **1.1.0 版启发式验证优先级规则**，不是 OWASP 官方分数、漏洞严重度或漏洞概率。适用于本轮声明的资产单元、采集时间和网络视角；不能把内网扫描结果描述成互联网暴露。候选分数与本轮行动队列分开：高分线索也可能先核对公告或取得角色，而非立即测试网站。
+本表是 **1.2.0 版启发式技术线索分流规则**，不是 OWASP 官方分数、漏洞严重度或漏洞概率。适用于本轮声明的资产单元、采集时间和网络视角；不能把内网扫描结果描述成互联网暴露。技术分数、补证工作和业务功能评估分开：P4仍可能需要立即进行已获准的入口/浏览器核验，也可能已有值得进一步评估的实际业务功能；P1也可能先核对公告或取得角色。不能把技术分数当整个测试投入价值。
 
 ## 1. 资产类型：线索如何变为标签
 
@@ -132,7 +132,7 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
 
 ### 先按认证上下文形成行动队列
 
-`access_context` 包括 state、evidence_refs、available_roles、auth_group_id、auth_group_basis、preauth_signal_refs。未提供的 state 为 unknown、角色列表为空；空角色列表表示本轮未提供可用角色，不声称用户从未拥有账号。非 unknown state 需要证据引用，必须注明观察还是用户/项目声明。Title/厂商名不能证明当前匿名会话抵达后端功能。
+`access_context` 包括 state、evidence_refs、available_roles、auth_group_id、auth_group_basis、preauth_signal_refs。state允许unknown/error_only/auth_wall/public_content/public_function/authenticated_function/nonweb_service/render_pending/render_failed/transport_error。未提供的 state 为 unknown、角色列表为空；空角色列表表示本轮未提供可用角色，不声称用户从未拥有账号。非 unknown state 需要证据引用，必须注明观察还是用户/项目声明。Title/厂商名不能证明当前匿名会话抵达后端功能。
 
 这是封闭对象，只使用上述键；额外的依据说明放根级 access_notes 或证据旁表，不加入 access_context。跨端口/路径的适用范围不清时保留子项缺口，不能由一个登录入口替整台主机确定认证状态。
 
@@ -147,6 +147,10 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
 | 已有 T40、verified_finding | existing_finding_review：复核/处置已有发现，不被统一认证抵消 |
 | T.min≥20 且有具体前认证线索引用 | preauth_lead_review：核对该实例前认证线索和访问前提；引用须支持具体受影响面，不是版本 Title |
 | T.min≥20，其他认证前提未明 | advisory_applicability_review：先核公告适用性与入口条件，不把版本候选直接排成可测站点 |
+| HTTP壳、脚本应用或功能不清，state=render_pending | browser_evidence：正常浏览器渲染与资源核验，不能从静态HTML断言无业务 |
+| 渲染失败，state=render_failed或stage=browser_failed | browser_tool_review：记录实际失败与缺口，不能判低价值 |
+| TLS/连接等客户端失败，state=transport_error或stage=client_error | client_transport_review：核对客户端、地址/SNI/协议与正常工具条件，不宣布服务不存在 |
+| 仅清单材料，stage=inventory_only | entry_evidence：先推进获准的普通补证；不能从Title直接结束在线研判 |
 | auth_wall 且有获准角色 | authenticated_surface_mapping：正常登录后先辨认功能 |
 | auth_wall、未提供角色、有共享认证组 | shared_auth_review：每组先核代表，其他应用保留待角色条件 |
 | auth_wall 其余情况 | role_required：先取得本轮所需角色/应用关联资料 |
@@ -158,7 +162,13 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
 | public_content | routine_observation：保留内容与变化观察 |
 | unknown/其他 | entry_evidence：先补入口和认证证据 |
 
-`ready_for_live_review` 只有范围内、模式为 authorized_read_only，且进入 preauth_lead_review/authenticated_app_review/anonymous_app_review/nonweb_service_review 时才为 true；只说明可安排已获准的普通只读评估，不是扫描/利用授权。共享认证与取角色队列不占据“当前脆弱站点”榜。没有符合条件的对象时，允许当前榜单为空，明确下一步所需信息。
+`evidence_collection_allowed`只按范围内和authorized_read_only判断，与P1–P4及功能映射完成情况无关；为true且仍有entry/browser等任务时应继续补证。`ready_for_live_review`另要求已有合格观察阶段并进入preauth_lead_review/authenticated_app_review/anonymous_app_review/nonweb_service_review，表示可安排进一步普通应用评估，不是扫描/利用授权。**前者不因后者为false而失效；P4的已观察功能也可进入评估队列。**
+
+新增根字段 `observation_stage`（缺省inventory_only）和 `observation_refs`。非inventory阶段需非空引用；browser_rendered另需browser_evidence_refs，function_mapped另需function_evidence_refs。HTTP壳不能仅换阶段名就当作渲染完毕。阶段可用值见SKILL.md；这些字段不放入封闭的access_context对象。
+
+summary中的evidence_stage_counts统计记录的证据阶段；pending_observation_records包括非排除记录中仍需入口、渲染、角色、可用性等证据的项；assessment_stage为inventory_only/partial_evidence/evidence_available/no_active_records。这不是原始行数、真实请求次数或“全表已完成”标志。本轮访问数从本轮canonical observations按请求入口另算。明确排除项不计pending；有HTTP但内容仍未知不能因此标为观察完成。
+
+共享认证与取角色队列不占据“当前脆弱站点”榜，也不能成为停止其他获准补证的借口。只有在声明并实际覆盖的观察范围内，才可说未形成可立即应用评估候选；未渲染/未访问的大量条目仍是未完成，不等于整批无价值。
 
 ### 计算算例
 
@@ -197,6 +207,8 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
 
 缺少 technical_basis 的旧记录仅可支持 T 下界≤5；高于此值应补真实依据或调整下界，不能为兼容旧分数伪造 kind。summary 同时报 action_queue_counts 与显式 auth_groups；组代表按认证墙成员 ID 稳定选择，代表的用途只是核对共享前门。脚本不会判定页面含义、验证公告或自动识别认证分组。
 
+缺少observation_stage的旧记录默认inventory_only。新的DOM/响应/认证证据必须回灌后重跑JSON与CSV/HTML，不能只给报告追加一段“已访问”而留下旧阶段和覆盖数。仅Title相同的条目不可用group_inferred传播业务、安全或不可测结论。
+
 ## 6. 依据与查询入口（只在相关时查）
 
 - [OWASP 攻击面分析](https://cheatsheetseries.owasp.org/cheatsheets/Attack_Surface_Analysis_Cheat_Sheet.html)：按入口、功能与数据组织评估。
@@ -206,3 +218,4 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
 - [Cloudflare Proxy status](https://developers.cloudflare.com/dns/proxy-status/)、[OWASP HTTP Headers](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)、[OWASP TLS](https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html)、[AWS S3 公共访问](https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html)：防护与配置需具体证据。
 - [RFC1918](https://www.rfc-editor.org/rfc/rfc1918.html)、[域名控制验证](https://letsencrypt.org/how-it-works/)：地址/证书关联与组织归属不同。
 - [OWASP 认证模式](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Patterns_Cheat_Sheet.html#edge-level-authentication)、[授权检查](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)：集中认证前门与各应用的业务授权不同。
+- [Playwright 页面加载与动态内容](https://playwright.dev/docs/navigations)、[页面就绪与load-state](https://playwright.dev/docs/api/class-page#page-wait-for-load-state)、[Python SSL错误](https://docs.python.org/3/library/ssl.html#ssl.SSLEOFError)：原始HTTP、浏览器就绪与客户端失败必须区分。
