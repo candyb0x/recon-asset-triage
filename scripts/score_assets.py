@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 
-SCORING_VERSION = "1.0.0"
+SCORING_VERSION = "1.1.0"
 LEVELS = {
     "A": (0, 5, 10, 15, 20),
     "T": (0, 5, 10, 20, 30, 40),
@@ -25,6 +25,41 @@ PRIORITY_LABELS = {
 }
 SCOPES = {"in_scope", "unknown", "out_of_scope"}
 ENRICHMENT_MODES = {"offline", "authorized_read_only", "unspecified"}
+TECHNICAL_LOWER_LIMITS = {
+    "unspecified": 5,
+    "surface_hint": 5,
+    "assessed_no_signal": 0,
+    "service_observed": 10,
+    "lifecycle_confirmed": 10,
+    "debug_observed": 10,
+    "advisory_candidate": 20,
+    "prerequisites_supported": 30,
+    "verified_finding": 40,
+}
+ADVISORY_BASES = {"lifecycle_confirmed", "advisory_candidate", "prerequisites_supported"}
+ACCESS_STATES = {
+    "unknown", "error_only", "auth_wall", "public_content", "public_function",
+    "authenticated_function", "nonweb_service",
+}
+AUTH_GROUP_BASES = {"unknown", "user_reported", "observed", "documented"}
+QUEUE_REASONS = {
+    "excluded": "Explicit scope exclusion; this asset is outside the review queue.",
+    "existing_finding_review": "Review the existing finding report and applicability before planning further work.",
+    "preauth_lead_review": "Supported pre-authentication signal warrants a bounded lead review.",
+    "advisory_applicability_review": "Review advisory applicability and prerequisites before selecting live verification.",
+    "authenticated_surface_mapping": "Roles are provided but post-authentication functions have not been observed.",
+    "shared_auth_review": "Review the explicit group's representative authentication gate; retain each application separately.",
+    "role_required": "A suitable authorized role or session must be provided before application review.",
+    "authenticated_app_review": "Observed post-authentication functions and provided roles support application review.",
+    "anonymous_app_review": "Observed public functions support anonymous application-boundary review.",
+    "nonweb_service_review": "Observed non-web service context supports a scoped service review.",
+    "availability_recheck": "Access errors require an availability recheck, not a low-risk conclusion.",
+    "routine_observation": "Only public content is currently evidenced; retain routine observation and change triggers.",
+    "entry_evidence": "Entry-point evidence is insufficient to select a current application review target.",
+}
+LIVE_REVIEW_QUEUES = {
+    "preauth_lead_review", "authenticated_app_review", "anonymous_app_review", "nonweb_service_review",
+}
 
 
 def reject_constant(_value):
@@ -55,6 +90,108 @@ def dimension_range(value, dimension):
     if lower not in levels or upper not in levels or lower > upper:
         raise ValueError("Score level is outside the allowed dimension levels, or the interval is reversed")
     return {"min": lower, "max": upper}
+
+
+def string_ids(value, label):
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError(label + " must be an array of nonempty strings")
+    return list(value)
+
+
+def technical_basis(asset, technical_minimum, technical_refs):
+    basis = asset.get("technical_basis", {})
+    if not isinstance(basis, dict) or set(basis) - {"kind", "evidence_refs", "advisory_refs"}:
+        raise ValueError("technical_basis must contain only kind, evidence_refs and advisory_refs")
+    kind = basis.get("kind", "unspecified")
+    if not isinstance(kind, str) or kind not in TECHNICAL_LOWER_LIMITS:
+        raise ValueError("technical_basis.kind is not a supported evidence category")
+    evidence = string_ids(basis.get("evidence_refs", []), "technical_basis.evidence_refs")
+    advisories = string_ids(basis.get("advisory_refs", []), "technical_basis.advisory_refs")
+    if technical_minimum > TECHNICAL_LOWER_LIMITS[kind]:
+        raise ValueError("Technical score lower bound exceeds the supplied evidence category")
+    if technical_minimum >= 10 and (not evidence or not set(evidence).issubset(technical_refs)):
+        raise ValueError("T lower bounds of 10 or more need explicit basis evidence included in evidence_refs.T")
+    if kind in ADVISORY_BASES and (not advisories or not set(advisories).issubset(evidence)):
+        raise ValueError("This technical basis needs advisory_refs included in its evidence_refs")
+    return kind
+
+
+def access_context(asset):
+    context = asset.get("access_context", {})
+    allowed = {"state", "evidence_refs", "available_roles", "auth_group_id", "auth_group_basis", "preauth_signal_refs"}
+    if not isinstance(context, dict) or set(context) - allowed:
+        raise ValueError("access_context contains unsupported fields or is not an object")
+    state = context.get("state", "unknown")
+    if not isinstance(state, str) or state not in ACCESS_STATES:
+        raise ValueError("access_context.state is not a supported observation state")
+    evidence = string_ids(context.get("evidence_refs", []), "access_context.evidence_refs")
+    roles = string_ids(context.get("available_roles", []), "access_context.available_roles")
+    preauth = string_ids(context.get("preauth_signal_refs", []), "access_context.preauth_signal_refs")
+    if state != "unknown" and not evidence:
+        raise ValueError("Observed access states need nonempty access_context.evidence_refs")
+    group_id = context.get("auth_group_id")
+    if group_id is not None and (not isinstance(group_id, str) or not group_id.strip()):
+        raise ValueError("auth_group_id must be null or a nonempty string")
+    group_basis = context.get("auth_group_basis", "unknown")
+    if not isinstance(group_basis, str) or group_basis not in AUTH_GROUP_BASES:
+        raise ValueError("auth_group_basis must be unknown, user_reported, observed or documented")
+    if group_id is not None and (group_basis == "unknown" or not evidence):
+        raise ValueError("An explicit authentication group needs a stated basis and access evidence")
+    return {
+        "state": state,
+        "evidence_refs": evidence,
+        "available_roles": roles,
+        "auth_group_id": group_id,
+        "auth_group_basis": group_basis,
+        "preauth_signal_refs": preauth,
+    }
+
+
+def action_queue(scope, kind, technical_minimum, context):
+    state = context["state"]
+    roles = context["available_roles"]
+    if scope == "out_of_scope":
+        return "excluded"
+    if technical_minimum == 40 and kind == "verified_finding":
+        return "existing_finding_review"
+    if technical_minimum >= 20:
+        return "preauth_lead_review" if context["preauth_signal_refs"] else "advisory_applicability_review"
+    if state == "auth_wall":
+        if roles:
+            return "authenticated_surface_mapping"
+        return "shared_auth_review" if context["auth_group_id"] is not None else "role_required"
+    if state == "authenticated_function":
+        return "authenticated_app_review" if roles else "role_required"
+    return {
+        "public_function": "anonymous_app_review",
+        "nonweb_service": "nonweb_service_review",
+        "error_only": "availability_recheck",
+        "public_content": "routine_observation",
+    }.get(state, "entry_evidence")
+
+
+def authentication_groups(assets):
+    groups = {}
+    for asset in assets:
+        context = asset["triage"]["access_context"]
+        group_id = context["auth_group_id"]
+        if group_id is None:
+            continue
+        group = groups.setdefault(group_id, {"member_ids": [], "auth_wall_member_ids": [], "basis_levels": set()})
+        group["member_ids"].append(asset["asset_id"])
+        group["basis_levels"].add(context["auth_group_basis"])
+        if context["state"] == "auth_wall":
+            group["auth_wall_member_ids"].append(asset["asset_id"])
+    return [
+        {
+            "auth_group_id": group_id,
+            "member_ids": sorted(group["member_ids"]),
+            "auth_wall_member_ids": sorted(group["auth_wall_member_ids"]),
+            "basis_levels": sorted(group["basis_levels"]),
+            "representative_auth_gate": min(group["auth_wall_member_ids"]) if group["auth_wall_member_ids"] else None,
+        }
+        for group_id, group in sorted(groups.items())
+    ]
 
 
 def classify(bounds, lower, upper, coverage, scope):
@@ -121,7 +258,12 @@ def triage_asset(asset, index, seen_ids):
             coverage += cap
     lower = sum(value["min"] for value in bounds.values())
     upper = sum(value["max"] for value in bounds.values())
+    kind = technical_basis(asset, bounds["T"]["min"], set(refs.get("T", [])))
+    context = access_context(asset)
+    if kind == "service_observed" and context["state"] == "auth_wall":
+        raise ValueError("An authentication wall alone cannot establish an observed operational service")
     priority, rule_id = classify(bounds, lower, upper, coverage, scope)
+    queue = action_queue(scope, kind, bounds["T"]["min"], context)
     if scope == "out_of_scope":
         execution = "excluded"
     elif scope == "unknown":
@@ -143,6 +285,11 @@ def triage_asset(asset, index, seen_ids):
         "coverage_percent": coverage,
         "missing_dimensions": missing,
         "partial_dimensions": partial,
+        "technical_basis_kind": kind,
+        "access_context": context,
+        "action_queue": queue,
+        "queue_reason": QUEUE_REASONS[queue],
+        "ready_for_live_review": scope == "in_scope" and enrichment_mode == "authorized_read_only" and queue in LIVE_REVIEW_QUEUES,
         "enrichment_mode": enrichment_mode,
         "execution_status": execution,
         "interpretation": "Heuristic review priority, not vulnerability confirmation or probability.",
@@ -161,6 +308,7 @@ def score_inventory(records, source_hash):
             raise ValueError(f"Record {index}: {exc}") from exc
     counts = Counter(asset["triage"]["priority"] for asset in assets)
     executions = Counter(asset["triage"]["execution_status"] for asset in assets)
+    queues = Counter(asset["triage"]["action_queue"] for asset in assets)
     complete = sum(asset["triage"]["score_total"] is not None for asset in assets)
     return {
         "scoring_version": SCORING_VERSION,
@@ -169,6 +317,8 @@ def score_inventory(records, source_hash):
             "record_count": len(assets),
             "priority_counts": {code: counts[code] for code in PRIORITY_LABELS},
             "execution_status_counts": dict(executions),
+            "action_queue_counts": {queue: queues[queue] for queue in QUEUE_REASONS},
+            "auth_groups": authentication_groups(assets),
             "complete_score_records": complete,
             "interval_score_records": len(assets) - complete,
             "note": "All input records and their order are retained. Scope-excluded records are outside the review queue.",

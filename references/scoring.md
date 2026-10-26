@@ -1,6 +1,6 @@
 # 判别与评分参考
 
-本表是 **1.0.0 版启发式验证优先级规则**，不是 OWASP 官方分数、漏洞严重度或漏洞概率。适用于本轮声明的资产单元、采集时间和网络视角；不能把内网扫描结果描述成互联网暴露。
+本表是 **1.1.0 版启发式验证优先级规则**，不是 OWASP 官方分数、漏洞严重度或漏洞概率。适用于本轮声明的资产单元、采集时间和网络视角；不能把内网扫描结果描述成互联网暴露。候选分数与本轮行动队列分开：高分线索也可能先核对公告或取得角色，而非立即测试网站。
 
 ## 1. 资产类型：线索如何变为标签
 
@@ -22,7 +22,7 @@ SAN 中的名称用于关联候选，可能过期、共享或使用通配符，�
 
 | 线索 | 必须核对 | 可给出的结论/验证方向 |
 | --- | --- | --- |
-| 组件老旧、CVE/EOL | 供应商/产品、完整发行版/构建、来源时间、受影响版本范围、配置/认证/网络前提、发行版补丁回补 | 精确候选与适用前提；旧 Banner 不确认漏洞。EOL 是维护风险，不等于某个 CVE 可利用 |
+| 组件版本、CVE/EOL | 供应商/产品、完整发行版/构建、来源时间、受影响版本范围、厂商支持周期、配置/认证/网络前提、发行版补丁回补 | `V4.0` 只支持版本字样，不支持“老旧/EOL/有CVE”。没有适用公告就不叫版本漏洞候选；EOL 也不等于某个 CVE 可利用 |
 | Redis 6379、MongoDB 27017、Elasticsearch 9200、RDP 3389 | 端口是否实际开放、协议/服务是否识别、观测视角、认证/ACL/网络策略状态 | 高价值服务复核候选。仅端口号不确认产品；服务可达不确认未授权。认证未知时建议核对，不尝试凭据 |
 | Jenkins/GitLab 等研发管理系统 | 实际产品/管理面、访问上下文、公开内容是否预期 | 登录/公开项目仅说明入口；建议核对匿名权限、项目可见性和认证策略，不自动标“代码泄露” |
 | 默认凭据/弱口令可能性 | 已识别产品、安装/初始配置状态、厂商策略、项目提供的认证资料 | 标 `CREDENTIAL_REVIEW`；仅类型最多弱线索，不报告概率或已存在弱口令。不附口令表、不自动尝试 |
@@ -49,18 +49,37 @@ SAN 中的名称用于关联候选，可能过期、共享或使用通配符，�
 
 仅有主站/测试/外包标签不能代替影响依据。环境、原业务重要性、维护状态继续单列，A 不是资产“是否归属核心”的判定。
 
+仅“管理系统/备案平台/Metabase”等 Title 或产品类型不足以支持 A10/A15 的实际功能与非公开数据影响，应保留为用途线索或 A 区间。IP/ASN 的 org 常是运营商，不等于业务归属；不能据此补出业务重要性。
+
 ### T：技术薄弱线索强度（40）
 
 | 分值 | 判别条件 |
 | --- | --- |
 | 0 | 已检查声明观测面内的适用资料，未识别下列正向线索；不表示系统安全 |
-| 5 | 实际观察到文档/登录、扫描记录的常见高风险端口或已识别产品的初始配置可能性等弱线索；域名关键词本身不够 |
-| 10 | 已识别并可达的数据库/运维服务，认证待核对；可信 EOL；实际调试/堆栈等弱配置线索 |
+| 5 | Title/产品/版本字样、文档/登录、扫描记录的常见高风险端口或初始配置可能性等弱线索；仅域名关键词不够，未核对其他资料时保留区间 |
+| 10 | 已识别并触达的数据库协议或真实运维服务，认证待核对；有适用厂商依据的 EOL；实际调试/堆栈等弱配置线索。仅 HTTP 登录页或 SSO 前门不能套用“运维服务可达” |
 | 20 | 产品/版本与厂商受影响范围吻合，但部署配置、补丁回补或其他前提未知；可信的具体发现候选 |
 | 30 | 产品、版本、部署配置及访问前提都有依据支持适用性，尚未验证控制失效 |
 | 40 | 同一实例已有可靠、适用当前状态的**授权验证证据**；保留原验证范围、来源、时间与问题影响 |
 
 HTTP 200、文档页、某系统常见默认口令或历史 Banner 均不够 T40。T20/T30 本来就是未验证档位，不要求在本 Skill 内执行利用。若未检查的其他组件/资料可能改变现有最高档，使用区间；仅“尚未验证漏洞”不自动把一个已可判定的 T20 改成 T40 或所有维度未知。
+
+### 技术下界的证据种类门槛
+
+`technical_basis={kind,evidence_refs,advisory_refs}` 明确当前下界由什么支持；缺省 unspecified。脚本拒绝超过支持种类上限的 **T.min**，不限制缺资料时 T.max 的可能上界：
+
+| kind | 支持 T.min 的上限 | 必要依据 |
+| --- | --- | --- |
+| unspecified / surface_hint | 5 | 产品/标题/版本/端口线索；不许改写为 EOL、具体 CVE 或实际匿名功能 |
+| assessed_no_signal | 0 | 已检查声明观测面的资料，未见具体正向线索 |
+| service_observed | 10 | 已识别服务并触达相关协议/真实服务；不是仅看到 HTTP 认证墙 |
+| lifecycle_confirmed | 10 | 适用厂商生命周期/EOL 资料 |
+| debug_observed | 10 | 真实调试响应或可靠既有响应证据 |
+| advisory_candidate | 20 | 产品/版本与适用厂商公告对应；其他前提仍待核对 |
+| prerequisites_supported | 30 | 适用公告以及部署、认证/网络前提的支持证据 |
+| verified_finding | 40 | 同实例、当前适用、已有授权验证报告与问题证据 |
+
+T.min≥10 必须显式提供适用 kind 和非空 evidence_refs，引用都要出现在 evidence_refs.T。lifecycle_confirmed、advisory_candidate、prerequisites_supported 另需非空 advisory_refs，且属于该种类的证据引用。源文件一条 Title 不能通过换名变为公告；脚本只校验结构，Agent 仍须核对证据内容和出处。
 
 ### D：独立防护缺口（20）
 
@@ -84,6 +103,8 @@ HTTP 200、文档页、某系统常见默认口令或历史 Banner 均不够 T40
 | ≥8 | 20 |
 
 保留原始开放端口数和已识别服务数。相同应用的 HTTP/HTTPS、别名、重复扫描记录不重复计；同 IP 的不同租户/资产不能无依据聚合。独立认证/业务/部署单元可以分计，不能把几十个 URL 当几十个应用。扫描或识别覆盖不清时给 X 区间；例如至少发现 3 个单元但其余未识别，X=`[10,20]`。只有来源明确为外部视角才称互联网暴露。
+
+同一主机有多个 HTTPS 端口、空标题或网关错误，不证明有多个独立后端功能；先记录 raw_port_count，X 保留不确定。Title 的 403/504 不是独立状态码，更不能代表所有路径及后端都不可达。错误页进入可用性/访问条件复核，不成为范围排除依据。
 
 ## 4. 不完整信息、总分与阈值
 
@@ -109,6 +130,36 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
 
 同级优先考虑：适用当前实例的强技术证据 → 潜在后果 → 独立薄弱点叠加 → 证据时效/质量 → 下一步信息增益和成本。不得以端口多、名称可疑或防护指纹缺失压过已有严重问题证据。
 
+### 先按认证上下文形成行动队列
+
+`access_context` 包括 state、evidence_refs、available_roles、auth_group_id、auth_group_basis、preauth_signal_refs。未提供的 state 为 unknown、角色列表为空；空角色列表表示本轮未提供可用角色，不声称用户从未拥有账号。非 unknown state 需要证据引用，必须注明观察还是用户/项目声明。Title/厂商名不能证明当前匿名会话抵达后端功能。
+
+这是封闭对象，只使用上述键；额外的依据说明放根级 access_notes 或证据旁表，不加入 access_context。跨端口/路径的适用范围不清时保留子项缺口，不能由一个登录入口替整台主机确定认证状态。
+
+同 IdP 地址或同一登录外观不足以证明同策略。用户明确说明共享登录时可标 user_reported；已有登录链/部署材料支持时可标 observed/documented。每个显式组保留成员和一个稳定的认证墙代表，但**不合并应用数据/权限边界**；SSO 相同既不证明应用全面等安全，也不能支持“这是较弱的独立登录入口”。
+
+组代表是缺口复核的候选，不是脆弱性排名，也不要求重复验证已经提供的认证事实。若已有适用资料足以确认当前前门，直接复用；后续资料缺口可能是获准角色、登录后功能图或具体前认证访问前提。
+
+在范围排除后按顺序选择 action_queue：
+
+| 条件 | action_queue / 动作 |
+| --- | --- |
+| 已有 T40、verified_finding | existing_finding_review：复核/处置已有发现，不被统一认证抵消 |
+| T.min≥20 且有具体前认证线索引用 | preauth_lead_review：核对该实例前认证线索和访问前提；引用须支持具体受影响面，不是版本 Title |
+| T.min≥20，其他认证前提未明 | advisory_applicability_review：先核公告适用性与入口条件，不把版本候选直接排成可测站点 |
+| auth_wall 且有获准角色 | authenticated_surface_mapping：正常登录后先辨认功能 |
+| auth_wall、未提供角色、有共享认证组 | shared_auth_review：每组先核代表，其他应用保留待角色条件 |
+| auth_wall 其余情况 | role_required：先取得本轮所需角色/应用关联资料 |
+| authenticated_function 且有角色 | authenticated_app_review：按该应用对象/角色/租户边界评估 |
+| authenticated_function、未提供角色 | role_required：已有资料不等于当前会话可访问 |
+| public_function | anonymous_app_review：当前匿名真实功能评估，不等于已知漏洞 |
+| nonweb_service | nonweb_service_review：已识别服务边界复核，不等于未授权 |
+| error_only | availability_recheck：复核可用性/访问条件，不能判安全或剔除 |
+| public_content | routine_observation：保留内容与变化观察 |
+| unknown/其他 | entry_evidence：先补入口和认证证据 |
+
+`ready_for_live_review` 只有范围内、模式为 authorized_read_only，且进入 preauth_lead_review/authenticated_app_review/anonymous_app_review/nonweb_service_review 时才为 true；只说明可安排已获准的普通只读评估，不是扫描/利用授权。共享认证与取角色队列不占据“当前脆弱站点”榜。没有符合条件的对象时，允许当前榜单为空，明确下一步所需信息。
+
 ### 计算算例
 
 下列固定分值均假设判档所需材料在声明观测面内已充分检查；不是从“没给字段”推得 0。
@@ -121,6 +172,7 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
 | 非公开业务数据存在已有授权证实的严重访问控制问题，防护较好 | 15 | 40 | 0 | 0 | 55–55 / P1；R1 硬升级 |
 | 只有 dev-admin 域名，无其他资料 | null | null | null | null | 0–100 / P4；名称不计分 |
 | 同实例有 T30 适用性资料，其他三维未知 | null | 30 | null | null | 30–90 / P2，同时待补充 |
+| 用户报告共享认证，仅产品 V4.0 标题，未提供角色或具体弱点 | null | [5,40] | null | null | 5–100 / P4；共享认证代表复核，不是立即测试榜 |
 
 ## 5. 计算脚本的数据契约
 
@@ -134,12 +186,16 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
     "asset_id": "A01",
     "scope_status": "in_scope",
     "scores": {"A": 10, "T": 20, "D": {"min": 5, "max": 20}, "X": 15},
+    "technical_basis": {"kind": "advisory_candidate", "evidence_refs": ["E2"], "advisory_refs": ["E2"]},
+    "access_context": {"state": "unknown"},
     "evidence_refs": {"A": ["E1"], "T": ["E2"], "D": ["E3"], "X": ["E4"]}
   }
 ]
 ```
 
 此例 L=50、U=65，确定覆盖为 A20+T40+X20=80%，P2；不能因最高可能 65 就直接判 P1。输入 bool、非法分值/区间、重复 ID 或有分无引用会整批报错，不发布半份结果。修复问题后重试，不能删除异常行凑出完整报告。script 输出根对象含 `scoring_version/summary/assets`，每项增加 `triage`；实际键名以脚本为准。
+
+缺少 technical_basis 的旧记录仅可支持 T 下界≤5；高于此值应补真实依据或调整下界，不能为兼容旧分数伪造 kind。summary 同时报 action_queue_counts 与显式 auth_groups；组代表按认证墙成员 ID 稳定选择，代表的用途只是核对共享前门。脚本不会判定页面含义、验证公告或自动识别认证分组。
 
 ## 6. 依据与查询入口（只在相关时查）
 
@@ -149,3 +205,4 @@ P1/P2 同时保留 missing_information；强线索不因其他缺字段丢失。
 - [Red Hat 补丁回补](https://access.redhat.com/security/updates/backporting)、[FIRST CVSS](https://www.first.org/cvss/v4.0/user-guide)、[FIRST EPSS](https://www.first.org/epss/faq)、[CISA KEV 官方数据](https://github.com/cisagov/kev-data)：核对实例适用性，不机械按上游版本或指标定风险。
 - [Cloudflare Proxy status](https://developers.cloudflare.com/dns/proxy-status/)、[OWASP HTTP Headers](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)、[OWASP TLS](https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html)、[AWS S3 公共访问](https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html)：防护与配置需具体证据。
 - [RFC1918](https://www.rfc-editor.org/rfc/rfc1918.html)、[域名控制验证](https://letsencrypt.org/how-it-works/)：地址/证书关联与组织归属不同。
+- [OWASP 认证模式](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Patterns_Cheat_Sheet.html#edge-level-authentication)、[授权检查](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)：集中认证前门与各应用的业务授权不同。
