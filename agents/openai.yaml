@@ -1,0 +1,4 @@
+interface:
+  display_name: "信息收集资产优先级研判"
+  short_description: "对授权项目收集的资产按技术薄弱线索、防御和暴露面评分分级，输出验证队列"
+  default_prompt: "使用 $recon-asset-triage 研判这批已授权项目的资产清单，按证据应用评分规则，输出优先级、信息缺口与建议验证方向。"
